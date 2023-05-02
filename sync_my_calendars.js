@@ -4,6 +4,9 @@
   calendar account (e.g. personal or consulting calendars). 
   
   This file should be linked and contains the key functionality. 
+  
+  https://janelloi.com/auto-sync-google-calendar/
+  Originally forked from https://gist.github.com/ttrahan/a88febc0538315b05346f4e3b35997f2
 
 */
 
