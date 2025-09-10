@@ -1,25 +1,12 @@
-/* 
-  Google apps script to block off time in a destination calendar (e.g. a work calendar) 
-  with appointments created in secondary calendars that have been shared with the destination 
-  calendar account (e.g. personal or consulting calendars). 
-  
-  This file should be linked and contains the key functionality. 
-  
-  https://janelloi.com/auto-sync-google-calendar/
-  Originally forked from https://gist.github.com/ttrahan/a88febc0538315b05346f4e3b35997f2
-
+/*
+  NOTE: if this script is being run on multiple of the shared calendars
+  Secondary calendars must be shared with all event details in order to 
+  avoid cross-creation of duplicate blocking events. This is prevented by 
+  setting and reading a SyncMyCalendars key with value set to the origin
+  calendar ID; however, this tag will only be shared with the destination
+  calendar if the permissions are set to "share all details". (Share free-busy
+  only will not work)
 */
-
-function setSyncMyCalendarTags( calEvent, originCalendar ) {
-  // set tag on event with value of primary ID calendar
-  // this will be used to detect whether the event is already a copy, so that multiple calendars can be cross-synced without dupes
-  
-  calEvent.setTag( "CreatedBySyncMyCalendars", originCalendar ) 
-  Logger.log( "Set tag " + calEvent.getTag("CreatedBySyncMyCalendars") + " on event " + calEvent.getId() + " from calendar " + originCalendar);
-  return calEvent;
-}
-
-
 function sync( calendarid, eventTitle ) {
 
   var id=calendarid; // CHANGE - id of the secondary calendar to pull events from
@@ -75,7 +62,7 @@ function sync( calendarid, eventTitle ) {
           // set blocked time as calendar default for the destination calendar
           destinationEvent.setVisibility(CalendarApp.Visibility.DEFAULT); 
           destinationEvent.setColor("8");
-          // setSyncMyCalendarTags(destinationEvent, calendarid);
+          destinationEvent.setTag("CreatedBySyncMyCalendars", calendarid);
           destinationEventsUpdated.push(destinationEvent.getId());
           /*
           Logger.log('PRIMARY EVENT UPDATED'
@@ -88,7 +75,7 @@ function sync( calendarid, eventTitle ) {
       }
 
 
-    if (stat==0) continue;    
+    if (stat==0) continue;    // event has been updated - continue to next object in event loop
     
     var d = event_i.getStartTime();
     var n = d.getDay();
@@ -104,7 +91,7 @@ function sync( calendarid, eventTitle ) {
       Logger.log( "Found SyncMyCalendars TAG on novel event, skipping creation of " + event_i.getId());
       continue;
     }
-    else if (n==1 || n==2 || n==3 || n==4 || n==5) // Only include days of the week. Delete this if you want to include weekends
+    else if (n==1 || n==2 || n==3 || n==4 ) // Only include days of the week. Delete this if you want to include weekends
     // if the secondary event does not exist in the primary calendar, create it
     {
       // change the Booked text to whatever you would like your merged event titles to be
@@ -123,7 +110,9 @@ function sync( calendarid, eventTitle ) {
       newEvent.setDescription(event_i.getTitle() + '\n\n' + event_i.getDescription());
       */
       newEvent.setDescription("");
-      setSyncMyCalendarTags( newEvent, event_i.getOriginalCalendarId );
+
+      Logger.log( "Attempting to set tag for " + newEvent.getTitle() + " with value " + calendarid);
+      newEvent.setTag("CreatedBySyncMyCalendars", calendarid);
       newEvent.setVisibility(CalendarApp.Visibility.DEFAULT); // set blocked time as default appointments in destination calendar
       newEvent.setColor("8"); // set the copied event's color to gray
 
@@ -160,3 +149,25 @@ function sync( calendarid, eventTitle ) {
   Logger.log('Primary events created: ' + destinationEventsCreated.length);
 
 }  
+
+function syncMyOtherCalendar_01(){
+  // Keeping this as its own unique named function allows you to create a trigger when this calendar updates and ONLY update events from this calendar.
+
+  calendarID = "you1@example.com" // this is probably the email address associated with the calendar
+  eventTitleForCalendar = "Unavailable (" + calendarID + ")" ; // By default this will add the ID of the secondary calendar to the event title in your primary (work) calendar
+  sync( calendarID, eventTitleForCalendar );
+}
+
+function syncMyOtherCalendar_02() {
+  // Keeping this as its own unique named function allows you to create a trigger when this calendar updates and ONLY update events from this calendar.
+
+  calendarID = "you2@example.com" // this is probably the email address associated with the calendar
+  eventTitleForCalendar = "Unavailable (" + calendarID + ")" ; // By default this will add the ID of the secondary calendar to the event title in your primary (work) calendar
+  sync( calendarID, eventTitleForCalendar );
+}
+
+function syncAllCalendars() {
+  // call this function to sync all calendars. Each time you add a new sync function for an individual calendar, call the sync function here.
+  syncMyOtherCalendar_01();
+  //  syncMyOtherCalendar_02();
+}
