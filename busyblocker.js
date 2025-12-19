@@ -11,10 +11,21 @@ function sync( calendarid, eventTitle ) {
 
   var id=calendarid; // CHANGE - id of the secondary calendar to pull events from
 
-  var WINDOW_DAYS = 21; // how many days in advance to monitor and block off time
-  var WRITE_LIMIT = 50; // stop early to avoid CalendarApp write-rate limits
+  var WINDOW_DAYS = 7; // how many days in advance to monitor and block off time
+  var WRITE_LIMIT = 60; // cap writes if ENFORCE_WRITE_LIMIT is true
+  var ENFORCE_WRITE_LIMIT = false; // prioritize correctness; set true to enforce the cap
+  var WRITE_PAUSE_MS = 150; // base pause per write
+  var BURST_WRITE_PAUSE_MS = 1000; // elevated pause when many writes are needed
+  var BURST_CREATE_THRESHOLD = 5; // if more than this many creates are needed, treat as burst
+  var SOURCE_TAG = 'SyncSourceId';
+  var ORIGIN_TAG = 'CreatedBySyncMyCalendars';
   var writes = 0;
   var stopEarly = false;
+  var sourceKey = function(evt) {
+    var original = evt.getOriginalStartTime ? evt.getOriginalStartTime() : null;
+    var anchor = original ? original.getTime() : evt.getStartTime().getTime();
+    return evt.getId() + '|' + anchor;
+  };
 
   var today=new Date();
   var enddate=new Date();
@@ -36,9 +47,24 @@ function sync( calendarid, eventTitle ) {
   var event_i, existingEvent; 
   var destinationEventsFiltered = []; // to contain primary calendar events that were previously created from secondary calendar
   var destinationEventsByTime = {}; // quick lookup by start/end to avoid unnecessary writes
+  var destinationEventsBySource = {}; // lookup by source event id tag to allow start/end changes without delete+create
   var destinationEventsUpdated = []; // to contain primary calendar events that were updated from secondary calendar
   var destinationEventsCreated = []; // to contain primary calendar events that were created from secondary calendar
   var destinationEventsDeleted = []; // to contain primary calendar events previously created that have been deleted from secondary calendar
+  var seenSourceIds = {}; // track which source events were processed to avoid deleting moved events
+  var countWrite = function() {
+    writes++;
+    var pause = WRITE_PAUSE_MS;
+    if (destinationEventsCreated.length > BURST_CREATE_THRESHOLD) {
+      pause = BURST_WRITE_PAUSE_MS;
+    }
+    if (pause > 0) {
+      Utilities.sleep(pause);
+    }
+  };
+  var shouldStop = function() {
+    return ENFORCE_WRITE_LIMIT && WRITE_LIMIT > 0 && writes >= WRITE_LIMIT;
+  };
 
   Logger.log( id + ' - number of primaryEvents: ' + destinationEvents.length);  
   Logger.log( id + ' - number of secondaryEvents: ' + secondaryEvents.length);
@@ -47,10 +73,15 @@ function sync( calendarid, eventTitle ) {
   for (destev in destinationEvents)
   {
     var destinationEvent = destinationEvents[destev];
-    if (destinationEvent.getTag("CreatedBySyncMyCalendars") === calendarid || destinationEvent.getTitle() == destinationEventTitle)
+    var destOriginTag = destinationEvent.getTag(ORIGIN_TAG);
+    var destSourceTag = destinationEvent.getTag(SOURCE_TAG);
+    if (destOriginTag === calendarid || destinationEvent.getTitle() == destinationEventTitle)
     { 
       destinationEventsFiltered.push(destinationEvent); 
       destinationEventsByTime[destinationEvent.getStartTime().getTime() + '|' + destinationEvent.getEndTime().getTime()] = destinationEvent;
+      if (destSourceTag) {
+        destinationEventsBySource[destSourceTag] = destinationEvent;
+      }
     }
   }
   
@@ -59,41 +90,80 @@ function sync( calendarid, eventTitle ) {
   {
     stat=1;
     event_i=secondaryEvents[secev];
+    var sourceId = sourceKey(event_i);
+    var existingFromSource = destinationEventsBySource[sourceId];
+
+    // Prefer matching by source tag to survive start/end changes, else fall back to time match
+    if (existingFromSource)
+    {
+      existingEvent = existingFromSource;
+    } else {
+      var existingKey = event_i.getStartTime().getTime() + '|' + event_i.getEndTime().getTime();
+      existingEvent = destinationEventsByTime[existingKey];
+    }
 
     // if the secondary event has already been blocked in the primary calendar, update it
-    var existingKey = event_i.getStartTime().getTime() + '|' + event_i.getEndTime().getTime();
-    var existingEvent = destinationEventsByTime[existingKey];
     if (existingEvent)
     {
       stat=0;
+      var changed = false;
       // Only write if something actually needs to change to avoid quota issues
       if (existingEvent.getTitle() !== destinationEventTitle)
       {
         existingEvent.setTitle(destinationEventTitle);
-        writes++;
+        changed = true;
+        countWrite();
+        if (shouldStop()) break;
       }
       if (existingEvent.getVisibility() !== CalendarApp.Visibility.DEFAULT)
       {
         existingEvent.setVisibility(CalendarApp.Visibility.DEFAULT);
-        writes++;
+        changed = true;
+        countWrite();
+        if (shouldStop()) break;
       }
       if (existingEvent.getColor() !== "8")
       {
         existingEvent.setColor("8");
-        writes++;
+        changed = true;
+        countWrite();
+        if (shouldStop()) break;
       }
-      if (existingEvent.getTag("CreatedBySyncMyCalendars") !== calendarid)
+      if (existingEvent.getTag(ORIGIN_TAG) !== calendarid)
       {
-        existingEvent.setTag("CreatedBySyncMyCalendars", calendarid);
-        writes++;
+        existingEvent.setTag(ORIGIN_TAG, calendarid);
+        changed = true;
+        countWrite();
+        if (shouldStop()) break;
+      }
+      var existingSourceTag = existingEvent.getTag(SOURCE_TAG);
+      if (existingSourceTag !== sourceId)
+      {
+        existingEvent.setTag(SOURCE_TAG, sourceId);
+        changed = true;
+        countWrite();
+        if (shouldStop()) break;
       }
       if (existingEvent.getDescription())
       {
         existingEvent.setDescription("");
-        writes++;
+        changed = true;
+        countWrite();
+        if (shouldStop()) break;
+      }
+      // If the time changed (e.g., edited recurring event), update instead of delete+create
+      var startChanged = existingEvent.getStartTime().getTime() !== event_i.getStartTime().getTime();
+      var endChanged = existingEvent.getEndTime().getTime() !== event_i.getEndTime().getTime();
+      if (startChanged || endChanged)
+      {
+        existingEvent.setTime(event_i.getStartTime(), event_i.getEndTime());
+        changed = true;
+        countWrite();
+        if (shouldStop()) break;
       }
       destinationEventsUpdated.push(existingEvent.getId());
-      if (writes >= WRITE_LIMIT) {
+      seenSourceIds[sourceId] = true;
+      if (shouldStop()) {
         Logger.log('Write limit reached during updates; stopping early');
         stopEarly = true;
         break;
@@ -117,7 +187,7 @@ function sync( calendarid, eventTitle ) {
       Logger.log( "Found SyncMyCalendars TAG on novel event, skipping creation of " + event_i.getId());
       continue;
     }
-    else if (n==1 || n==2 || n==3 || n==4 ) // Only include days of the week. Delete this if you want to include weekends
+    else if (n==1 || n==2 || n==3 || n==4 || n==5 || n==6 || n==0) // Only include days of the week. Delete this if you want to include weekends
     // if the secondary event does not exist in the primary calendar, create it
     {
       // change the Booked text to whatever you would like your merged event titles to be
@@ -138,7 +208,8 @@ function sync( calendarid, eventTitle ) {
       newEvent.setDescription("");
 
       Logger.log( "Attempting to set tag for " + newEvent.getTitle() + " with value " + calendarid);
-      newEvent.setTag("CreatedBySyncMyCalendars", calendarid);
+      newEvent.setTag(ORIGIN_TAG, calendarid);
+      newEvent.setTag(SOURCE_TAG, sourceId);
       newEvent.setVisibility(CalendarApp.Visibility.DEFAULT); // set blocked time as default appointments in destination calendar
       newEvent.setColor("8"); // set the copied event's color to gray
 
@@ -148,8 +219,11 @@ function sync( calendarid, eventTitle ) {
 
       destinationEventsCreated.push(newEvent.getId());
       destinationEventsByTime[newEvent.getStartTime().getTime() + '|' + newEvent.getEndTime().getTime()] = newEvent;
-      writes++;
-      if (writes >= WRITE_LIMIT) {
+      destinationEventsBySource[sourceId] = newEvent;
+      seenSourceIds[sourceId] = true;
+      // Each setter above is a write; throttle after the block
+      countWrite();
+      if (shouldStop()) {
         Logger.log('Write limit reached during creation; stopping early');
         stopEarly = true;
         break;
@@ -169,14 +243,16 @@ function sync( calendarid, eventTitle ) {
     for (pev in destinationEventsFiltered)
     {
       var pevIsUpdatedIndex = destinationEventsUpdated.indexOf(destinationEventsFiltered[pev].getId());
-      if (pevIsUpdatedIndex == -1)
+      var pevSource = destinationEventsFiltered[pev].getTag(SOURCE_TAG);
+      var skipDelete = pevSource && seenSourceIds[pevSource];
+      if (pevIsUpdatedIndex == -1 && !skipDelete)
       { 
         var pevIdToDelete = destinationEventsFiltered[pev].getId();
         Logger.log(pevIdToDelete + ' deleted');
         destinationEventsDeleted.push(pevIdToDelete);
         destinationEventsFiltered[pev].deleteEvent();
-        writes++;
-        if (writes >= WRITE_LIMIT) {
+        countWrite();
+        if (shouldStop()) {
           Logger.log('Write limit reached during cleanup; stopping early');
           stopEarly = true;
           break;
