@@ -11,11 +11,20 @@ function sync( calendarid, eventTitle ) {
 
   var id=calendarid; // CHANGE - id of the secondary calendar to pull events from
 
+  var WINDOW_DAYS = 21; // how many days in advance to monitor and block off time
+  var WRITE_LIMIT = 50; // stop early to avoid CalendarApp write-rate limits
+  var writes = 0;
+  var stopEarly = false;
+
   var today=new Date();
   var enddate=new Date();
-  enddate.setDate(today.getDate()+21); // how many days in advance to monitor and block off time
+  enddate.setDate(today.getDate()+WINDOW_DAYS);
   
   var secondaryCal=CalendarApp.getCalendarById(id);
+  if (!secondaryCal) {
+    Logger.log('Secondary calendar not found or inaccessible: ' + id);
+    return;
+  }
   var secondaryEvents=secondaryCal.getEvents(today,enddate);
   
   var destinationCalendar=CalendarApp.getDefaultCalendar();
@@ -26,6 +35,7 @@ function sync( calendarid, eventTitle ) {
   var stat=1;
   var event_i, existingEvent; 
   var destinationEventsFiltered = []; // to contain primary calendar events that were previously created from secondary calendar
+  var destinationEventsByTime = {}; // quick lookup by start/end to avoid unnecessary writes
   var destinationEventsUpdated = []; // to contain primary calendar events that were updated from secondary calendar
   var destinationEventsCreated = []; // to contain primary calendar events that were created from secondary calendar
   var destinationEventsDeleted = []; // to contain primary calendar events previously created that have been deleted from secondary calendar
@@ -37,8 +47,11 @@ function sync( calendarid, eventTitle ) {
   for (destev in destinationEvents)
   {
     var destinationEvent = destinationEvents[destev];
-    if (destinationEvent.getTitle() == destinationEventTitle)
-    { destinationEventsFiltered.push(destinationEvent); }
+    if (destinationEvent.getTag("CreatedBySyncMyCalendars") === calendarid || destinationEvent.getTitle() == destinationEventTitle)
+    { 
+      destinationEventsFiltered.push(destinationEvent); 
+      destinationEventsByTime[destinationEvent.getStartTime().getTime() + '|' + destinationEvent.getEndTime().getTime()] = destinationEvent;
+    }
   }
   
   // process all events in secondary calendar; either update, create, or delete
@@ -48,31 +61,44 @@ function sync( calendarid, eventTitle ) {
     event_i=secondaryEvents[secev];
 
     // if the secondary event has already been blocked in the primary calendar, update it
-    for (existingEvent in destinationEventsFiltered)
+    var existingKey = event_i.getStartTime().getTime() + '|' + event_i.getEndTime().getTime();
+    var existingEvent = destinationEventsByTime[existingKey];
+    if (existingEvent)
+    {
+      stat=0;
+      // Only write if something actually needs to change to avoid quota issues
+      if (existingEvent.getTitle() !== destinationEventTitle)
       {
-        var destinationEvent = destinationEventsFiltered[existingEvent];
-        var secondaryTitle = event_i.getTitle();
-        var secondaryDesc = event_i.getDescription();
-        if ((destinationEvent.getStartTime().getTime()==event_i.getStartTime().getTime()) && (destinationEvent.getEndTime().getTime()==event_i.getEndTime().getTime()))
-        {
-          stat=0;
-          destinationEvent.setTitle(destinationEventTitle);
-          // pEvent.setDescription(secondaryTitle + '\n\n' + secondaryDesc);
-          // event.setDescription(event_i.getTitle() + '\n\n' + event_i.getDescription());
-          // set blocked time as calendar default for the destination calendar
-          destinationEvent.setVisibility(CalendarApp.Visibility.DEFAULT); 
-          destinationEvent.setColor("8");
-          destinationEvent.setTag("CreatedBySyncMyCalendars", calendarid);
-          destinationEventsUpdated.push(destinationEvent.getId());
-          /*
-          Logger.log('PRIMARY EVENT UPDATED'
-                     + '\nprimaryId: ' + destinationEvent.getId() 
-                     + ' \nprimaryTitle: ' + destinationEvent.getTitle() 
-                     + ' \nprimaryDesc: ' + destinationEvent.getDescription()
-                    );
-          */
-        } 
+        existingEvent.setTitle(destinationEventTitle);
+        writes++;
       }
+      if (existingEvent.getVisibility() !== CalendarApp.Visibility.DEFAULT)
+      {
+        existingEvent.setVisibility(CalendarApp.Visibility.DEFAULT);
+        writes++;
+      }
+      if (existingEvent.getColor() !== "8")
+      {
+        existingEvent.setColor("8");
+        writes++;
+      }
+      if (existingEvent.getTag("CreatedBySyncMyCalendars") !== calendarid)
+      {
+        existingEvent.setTag("CreatedBySyncMyCalendars", calendarid);
+        writes++;
+      }
+      if (existingEvent.getDescription())
+      {
+        existingEvent.setDescription("");
+        writes++;
+      }
+      destinationEventsUpdated.push(existingEvent.getId());
+      if (writes >= WRITE_LIMIT) {
+        Logger.log('Write limit reached during updates; stopping early');
+        stopEarly = true;
+        break;
+      }
+    }
 
 
     if (stat==0) continue;    // event has been updated - continue to next object in event loop
@@ -121,6 +147,13 @@ function sync( calendarid, eventTitle ) {
       newEvent.removeAllReminders();
 
       destinationEventsCreated.push(newEvent.getId());
+      destinationEventsByTime[newEvent.getStartTime().getTime() + '|' + newEvent.getEndTime().getTime()] = newEvent;
+      writes++;
+      if (writes >= WRITE_LIMIT) {
+        Logger.log('Write limit reached during creation; stopping early');
+        stopEarly = true;
+        break;
+      }
       Logger.log('CREATED DESTINATION EVENT'
                  + '\nprimaryId: ' + newEvent.getId() 
                  + '\nprimaryTitle: ' + newEvent.getTitle() 
@@ -131,22 +164,32 @@ function sync( calendarid, eventTitle ) {
   }
 
   // if a primary event previously created no longer exists in the secondary calendar, delete it
-  for (pev in destinationEventsFiltered)
+  if (!stopEarly)
   {
-    var pevIsUpdatedIndex = destinationEventsUpdated.indexOf(destinationEventsFiltered[pev].getId());
-    if (pevIsUpdatedIndex == -1)
-    { 
-      var pevIdToDelete = destinationEventsFiltered[pev].getId();
-      Logger.log(pevIdToDelete + ' deleted');
-      destinationEventsDeleted.push(pevIdToDelete);
-      destinationEventsFiltered[pev].deleteEvent();
-    }
-  }  
+    for (pev in destinationEventsFiltered)
+    {
+      var pevIsUpdatedIndex = destinationEventsUpdated.indexOf(destinationEventsFiltered[pev].getId());
+      if (pevIsUpdatedIndex == -1)
+      { 
+        var pevIdToDelete = destinationEventsFiltered[pev].getId();
+        Logger.log(pevIdToDelete + ' deleted');
+        destinationEventsDeleted.push(pevIdToDelete);
+        destinationEventsFiltered[pev].deleteEvent();
+        writes++;
+        if (writes >= WRITE_LIMIT) {
+          Logger.log('Write limit reached during cleanup; stopping early');
+          stopEarly = true;
+          break;
+        }
+      }
+    }  
+  }
 
   Logger.log('Primary events previously created: ' + destinationEventsFiltered.length);
   Logger.log('Primary events updated: ' + destinationEventsUpdated.length);
   Logger.log('Primary events deleted: ' + destinationEventsDeleted.length);
   Logger.log('Primary events created: ' + destinationEventsCreated.length);
+  Logger.log('Write operations this run: ' + writes);
 
 }  
 
