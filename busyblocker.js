@@ -9,38 +9,40 @@
 */
 function sync( calendarid, eventTitle ) {
 
-  var id=calendarid; // CHANGE - id of the secondary calendar to pull events from
+  var id=calendarid; // id of the secondary calendar to pull events from
 
-  // AdminControls: tier- or deployment-controlled defaults
-  var AdminControls = {
-    WINDOW_DAYS: 7, // how many days in advance to monitor and block off time
-    ENFORCE_WRITE_LIMIT: false, // prioritize correctness; set true to enforce the cap
-    WRITE_LIMIT: 60, // cap writes if ENFORCE_WRITE_LIMIT is true
-    WRITE_PAUSE_MS: 150, // base pause per write
-    BURST_WRITE_PAUSE_MS: 1000, // elevated pause when many writes are needed
-    BURST_CREATE_THRESHOLD: 5, // if more than this many creates are needed, treat as burst
+  // Fallbacks in case config files are missing
+  var admin = (typeof AdminControls !== 'undefined') ? AdminControls : {
+    WINDOW_DAYS: 7,
+    ENFORCE_WRITE_LIMIT: false,
+    WRITE_LIMIT: 60,
+    WRITE_PAUSE_MS: 150,
+    BURST_WRITE_PAUSE_MS: 1000,
+    BURST_CREATE_THRESHOLD: 5,
     SOURCE_TAG: 'SyncSourceId',
     ORIGIN_TAG: 'CreatedBySyncMyCalendars'
   };
-
-  // UserSettings: knobs end users can control (respecting AdminControls when enforced)
-  var UserSettings = {
-    windowDays: AdminControls.WINDOW_DAYS,
-    includeDays: [0,1,2,3,4,5,6], // all days; user-filterable in future
+  // Prefer local override (not checked in), else committed UserSettings, else fallback
+  var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal :
+             (typeof UserSettings !== 'undefined') ? UserSettings : {
+    windowDays: admin.WINDOW_DAYS,
+    includeDays: [0,1,2,3,4,5,6],
     destinationEventTitle: eventTitle,
-    color: "8", // gray
+    color: "8",
     clearDescription: true,
     removeReminders: true,
     visibility: CalendarApp.Visibility.DEFAULT
   };
+
   // Local aliases for readability
-  var WRITE_LIMIT = AdminControls.WRITE_LIMIT;
-  var ENFORCE_WRITE_LIMIT = AdminControls.ENFORCE_WRITE_LIMIT;
-  var WRITE_PAUSE_MS = AdminControls.WRITE_PAUSE_MS;
-  var BURST_WRITE_PAUSE_MS = AdminControls.BURST_WRITE_PAUSE_MS;
-  var BURST_CREATE_THRESHOLD = AdminControls.BURST_CREATE_THRESHOLD;
-  var SOURCE_TAG = AdminControls.SOURCE_TAG;
-  var ORIGIN_TAG = AdminControls.ORIGIN_TAG;
+  var WRITE_LIMIT = admin.WRITE_LIMIT;
+  var ENFORCE_WRITE_LIMIT = admin.ENFORCE_WRITE_LIMIT;
+  var WRITE_PAUSE_MS = admin.WRITE_PAUSE_MS;
+  var BURST_WRITE_PAUSE_MS = admin.BURST_WRITE_PAUSE_MS;
+  var BURST_CREATE_THRESHOLD = admin.BURST_CREATE_THRESHOLD;
+  var SOURCE_TAG = admin.SOURCE_TAG;
+  var ORIGIN_TAG = admin.ORIGIN_TAG;
+
   var writes = 0;
   var stopEarly = false;
   var sourceKey = function(evt) {
@@ -51,7 +53,7 @@ function sync( calendarid, eventTitle ) {
 
   var today=new Date();
   var enddate=new Date();
-  enddate.setDate(today.getDate()+UserSettings.windowDays);
+  enddate.setDate(today.getDate()+user.windowDays);
   
   var secondaryCal=CalendarApp.getCalendarById(id);
   if (!secondaryCal) {
@@ -63,7 +65,7 @@ function sync( calendarid, eventTitle ) {
   var destinationCalendar=CalendarApp.getDefaultCalendar();
   var destinationEvents=destinationCalendar.getEvents(today,enddate); // all primary calendar events
   
-  var destinationEventTitle=UserSettings.destinationEventTitle; // update this to the text you'd like to appear in the new events created in primary calendar
+  var destinationEventTitle=eventTitle || user.destinationEventTitle;
   
   var stat=1;
   var event_i, existingEvent; 
@@ -137,16 +139,16 @@ function sync( calendarid, eventTitle ) {
         countWrite();
         if (shouldStop()) break;
       }
-      if (existingEvent.getVisibility() !== CalendarApp.Visibility.DEFAULT)
+      if (existingEvent.getVisibility() !== user.visibility)
       {
-        existingEvent.setVisibility(UserSettings.visibility);
+        existingEvent.setVisibility(user.visibility);
         changed = true;
         countWrite();
         if (shouldStop()) break;
       }
-      if (existingEvent.getColor() !== "8")
+      if (existingEvent.getColor() !== user.color)
       {
-        existingEvent.setColor(UserSettings.color);
+        existingEvent.setColor(user.color);
         changed = true;
         countWrite();
         if (shouldStop()) break;
@@ -168,7 +170,7 @@ function sync( calendarid, eventTitle ) {
       }
       if (existingEvent.getDescription())
       {
-        if (UserSettings.clearDescription) { existingEvent.setDescription(""); }
+        if (user.clearDescription) { existingEvent.setDescription(""); }
         changed = true;
         countWrite();
         if (shouldStop()) break;
@@ -209,7 +211,7 @@ function sync( calendarid, eventTitle ) {
       Logger.log( "Found SyncMyCalendars TAG on novel event, skipping creation of " + event_i.getId());
       continue;
     }
-    else if (UserSettings.includeDays.indexOf(n) !== -1) // Only include configured days
+    else if (user.includeDays.indexOf(n) !== -1) // Only include configured days
     // if the secondary event does not exist in the primary calendar, create it
     {
       // change the Booked text to whatever you would like your merged event titles to be
@@ -232,12 +234,14 @@ function sync( calendarid, eventTitle ) {
       Logger.log( "Attempting to set tag for " + newEvent.getTitle() + " with value " + calendarid);
       newEvent.setTag(ORIGIN_TAG, calendarid);
       newEvent.setTag(SOURCE_TAG, sourceId);
-      newEvent.setVisibility(UserSettings.visibility); // set blocked time as default appointments in destination calendar
-      newEvent.setColor(UserSettings.color); // set the copied event's color
+      newEvent.setVisibility(user.visibility); // set blocked time as default appointments in destination calendar
+      newEvent.setColor(user.color); // set the copied event's color
 
       // so you don't get double notifications. 
       // Delete this if you want to keep the default reminders for your newly created primary calendar events
-      newEvent.removeAllReminders();
+      if (user.removeReminders) {
+        newEvent.removeAllReminders();
+      }
 
       destinationEventsCreated.push(newEvent.getId());
       destinationEventsByTime[newEvent.getStartTime().getTime() + '|' + newEvent.getEndTime().getTime()] = newEvent;
@@ -291,24 +295,15 @@ function sync( calendarid, eventTitle ) {
 
 }  
 
-function syncMyOtherCalendar_01(){
-  // Keeping this as its own unique named function allows you to create a trigger when this calendar updates and ONLY update events from this calendar.
-
-  calendarID = "you1@example.com" // this is probably the email address associated with the calendar
-  eventTitleForCalendar = "Unavailable (" + calendarID + ")" ; // By default this will add the ID of the secondary calendar to the event title in your primary (work) calendar
-  sync( calendarID, eventTitleForCalendar );
-}
-
-function syncMyOtherCalendar_02() {
-  // Keeping this as its own unique named function allows you to create a trigger when this calendar updates and ONLY update events from this calendar.
-
-  calendarID = "you2@example.com" // this is probably the email address associated with the calendar
-  eventTitleForCalendar = "Unavailable (" + calendarID + ")" ; // By default this will add the ID of the secondary calendar to the event title in your primary (work) calendar
-  sync( calendarID, eventTitleForCalendar );
-}
-
 function syncAllCalendars() {
-  // call this function to sync all calendars. Each time you add a new sync function for an individual calendar, call the sync function here.
-  syncMyOtherCalendar_01();
-  //  syncMyOtherCalendar_02();
+  if (typeof UserSettings === 'undefined' || !UserSettings.sourceCalendars || UserSettings.sourceCalendars.length === 0) {
+    Logger.log('No sourceCalendars configured in UserSettings.');
+    return;
+  }
+  for (var i = 0; i < UserSettings.sourceCalendars.length; i++) {
+    var cfg = UserSettings.sourceCalendars[i];
+    var calId = cfg.id;
+    var title = cfg.title || ('Unavailable (' + calId + ')');
+    sync(calId, title);
+  }
 }
