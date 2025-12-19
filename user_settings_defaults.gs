@@ -1,7 +1,5 @@
-// UserSettings: knobs end users can control (respecting AdminControls when enforced)
-// Do not put real calendar IDs here if you plan to commit this file. Copy this to
-// `user_settings.local.gs` (gitignored) for your real IDs.
-var UserSettings = {
+// UserSettingsDefaults: committed defaults. For real calendar IDs, create user_settings.local.gs with UserSettingsLocal.
+var UserSettingsDefaults = {
   windowDays: AdminControls.WINDOW_DAYS,
   includeDays: [0,1,2,3,4,5,6], // all days
   destinationEventTitle: 'Unavailable',

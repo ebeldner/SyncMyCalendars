@@ -11,28 +11,15 @@ function sync( calendarid, eventTitle ) {
 
   var id=calendarid; // id of the secondary calendar to pull events from
 
-  // Fallbacks in case config files are missing
-  var admin = (typeof AdminControls !== 'undefined') ? AdminControls : {
-    WINDOW_DAYS: 7,
-    ENFORCE_WRITE_LIMIT: false,
-    WRITE_LIMIT: 60,
-    WRITE_PAUSE_MS: 150,
-    BURST_WRITE_PAUSE_MS: 1000,
-    BURST_CREATE_THRESHOLD: 5,
-    SOURCE_TAG: 'SyncSourceId',
-    ORIGIN_TAG: 'CreatedBySyncMyCalendars'
-  };
-  // Prefer local override (not checked in), else committed UserSettings, else fallback
-  var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal :
-             (typeof UserSettings !== 'undefined') ? UserSettings : {
-    windowDays: admin.WINDOW_DAYS,
-    includeDays: [0,1,2,3,4,5,6],
-    destinationEventTitle: eventTitle,
-    color: "8",
-    clearDescription: true,
-    removeReminders: true,
-    visibility: CalendarApp.Visibility.DEFAULT
-  };
+  if (typeof AdminControls === 'undefined') {
+    throw new Error('AdminControls is not defined. Ensure admin_config.gs is loaded before busyblocker.js.');
+  }
+  if (typeof UserSettingsDefaults === 'undefined' && typeof UserSettingsLocal === 'undefined') {
+    throw new Error('User settings are not defined. Add user_settings.gs (UserSettingsDefaults) or user_settings.local.gs before busyblocker.js.');
+  }
+  // Prefer local override (not checked in), else committed UserSettings
+  var admin = AdminControls;
+  var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal : UserSettingsDefaults;
 
   // Local aliases for readability
   var WRITE_LIMIT = admin.WRITE_LIMIT;
