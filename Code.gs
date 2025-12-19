@@ -12,12 +12,12 @@ function sync( calendarid, eventTitle ) {
   var id=calendarid; // id of the secondary calendar to pull events from
 
   if (typeof AdminControls === 'undefined') {
-    throw new Error('AdminControls is not defined. Ensure admin_config.gs is loaded before busyblocker.js.');
+    throw new Error('AdminControls is not defined. Ensure admin_config.gs is loaded before Code.gs.');
   }
   if (typeof UserSettingsDefaults === 'undefined' && typeof UserSettingsLocal === 'undefined') {
-    throw new Error('User settings are not defined. Add user_settings.gs (UserSettingsDefaults) or user_settings.local.gs before busyblocker.js.');
+    throw new Error('User settings are not defined. Add user_settings_defaults.gs (UserSettingsDefaults) or user_settings.local.gs before Code.gs.');
   }
-  // Prefer local override (not checked in), else committed UserSettings
+  // Prefer local override (not checked in), else committed defaults
   var admin = AdminControls;
   var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal : UserSettingsDefaults;
 
@@ -283,12 +283,19 @@ function sync( calendarid, eventTitle ) {
 }  
 
 function syncAllCalendars() {
-  if (typeof UserSettings === 'undefined' || !UserSettings.sourceCalendars || UserSettings.sourceCalendars.length === 0) {
-    Logger.log('No sourceCalendars configured in UserSettings.');
+  if (typeof AdminControls === 'undefined') {
+    throw new Error('AdminControls is not defined. Ensure admin_config.gs is loaded before Code.gs.');
+  }
+  if (typeof UserSettingsDefaults === 'undefined' && typeof UserSettingsLocal === 'undefined') {
+    throw new Error('User settings are not defined. Add user_settings_defaults.gs (UserSettingsDefaults) or user_settings.local.gs before Code.gs.');
+  }
+  var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal : UserSettingsDefaults;
+  if (!user.sourceCalendars || user.sourceCalendars.length === 0) {
+    Logger.log('No sourceCalendars configured in UserSettingsDefaults/UserSettingsLocal.');
     return;
   }
-  for (var i = 0; i < UserSettings.sourceCalendars.length; i++) {
-    var cfg = UserSettings.sourceCalendars[i];
+  for (var i = 0; i < user.sourceCalendars.length; i++) {
+    var cfg = user.sourceCalendars[i];
     var calId = cfg.id;
     var title = cfg.title || ('Unavailable (' + calId + ')');
     sync(calId, title);
