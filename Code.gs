@@ -29,6 +29,7 @@ function sync( calendarid, eventTitle ) {
   var BURST_CREATE_THRESHOLD = admin.BURST_CREATE_THRESHOLD;
   var SOURCE_TAG = admin.SOURCE_TAG;
   var ORIGIN_TAG = admin.ORIGIN_TAG;
+  var PROMO_MESSAGE = admin.PROMO_MESSAGE || '';
 
   var writes = 0;
   var stopEarly = false;
@@ -36,6 +37,15 @@ function sync( calendarid, eventTitle ) {
     var original = evt.getOriginalStartTime ? evt.getOriginalStartTime() : null;
     var anchor = original ? original.getTime() : evt.getStartTime().getTime();
     return evt.getId() + '|' + anchor;
+  };
+
+  var isTransparent = function(evt) {
+    try {
+      return evt.getTransparency() === CalendarApp.EventTransparency.TRANSPARENT;
+    } catch (e) {
+      // If the event is opaque, deleted, or otherwise inaccessible, treat it as opaque
+      return false;
+    }
   };
 
   var today=new Date();
@@ -104,6 +114,11 @@ function sync( calendarid, eventTitle ) {
     var sourceId = sourceKey(event_i);
     var existingFromSource = destinationEventsBySource[sourceId];
 
+    // Skip to next iteration if the origin event is transparent (free)
+    if (isTransparent(event_i)) {
+      continue;
+    }
+
     // Prefer matching by source tag to survive start/end changes, else fall back to time match
     if (existingFromSource)
     {
@@ -155,9 +170,13 @@ function sync( calendarid, eventTitle ) {
         countWrite();
         if (shouldStop()) break;
       }
-      if (existingEvent.getDescription())
+      var targetDescription = (PROMO_MESSAGE !== null && PROMO_MESSAGE !== undefined) ? PROMO_MESSAGE : '';
+      if (user.clearDescription && targetDescription === '') {
+        // keep targetDescription as empty string
+      }
+      if (existingEvent.getDescription() !== targetDescription)
       {
-        if (user.clearDescription) { existingEvent.setDescription(""); }
+        existingEvent.setDescription(targetDescription);
         changed = true;
         countWrite();
         if (shouldStop()) break;
@@ -190,12 +209,10 @@ function sync( calendarid, eventTitle ) {
     if (event_i.isAllDayEvent())
     {
       // Do nothing if the event is an all-day or multi-day event. This script only syncs hour-based events
-      Logger.log("Found ALL DAY EVENT, skipping creation of " + event_i.getId());
       continue; 
     } 
     else if ( event_i.getTag("CreatedBySyncMyCalendars") !== null ) 
     {
-      Logger.log( "Found SyncMyCalendars TAG on novel event, skipping creation of " + event_i.getId());
       continue;
     }
     else if (user.includeDays.indexOf(n) !== -1) // Only include configured days
@@ -216,9 +233,9 @@ function sync( calendarid, eventTitle ) {
           });  
       newEvent.setDescription(event_i.getTitle() + '\n\n' + event_i.getDescription());
       */
-      newEvent.setDescription("");
+      var targetDescription = (PROMO_MESSAGE !== null && PROMO_MESSAGE !== undefined) ? PROMO_MESSAGE : '';
+      newEvent.setDescription(targetDescription);
 
-      Logger.log( "Attempting to set tag for " + newEvent.getTitle() + " with value " + calendarid);
       newEvent.setTag(ORIGIN_TAG, calendarid);
       newEvent.setTag(SOURCE_TAG, sourceId);
       newEvent.setVisibility(user.visibility); // set blocked time as default appointments in destination calendar
@@ -241,12 +258,6 @@ function sync( calendarid, eventTitle ) {
         stopEarly = true;
         break;
       }
-      Logger.log('CREATED DESTINATION EVENT'
-                 + '\nprimaryId: ' + newEvent.getId() 
-                 + '\nprimaryTitle: ' + newEvent.getTitle() 
-                 + '\nprimaryDesc: ' + newEvent.getDescription() 
-                 + '\ntag CreatedBySyncMyCalendars set to: ' + newEvent.getTag("CreatedBySyncMyCalendars")
-                 );
     }
   }
 
@@ -261,7 +272,6 @@ function sync( calendarid, eventTitle ) {
       if (pevIsUpdatedIndex == -1 && !skipDelete)
       { 
         var pevIdToDelete = destinationEventsFiltered[pev].getId();
-        Logger.log(pevIdToDelete + ' deleted');
         destinationEventsDeleted.push(pevIdToDelete);
         destinationEventsFiltered[pev].deleteEvent();
         countWrite();
