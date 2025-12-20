@@ -12,124 +12,6 @@
 // Config + helpers
 // ----------------
 
-var USER_SETTINGS_KEY = 'BUSYBLOCKER_USER_SETTINGS';
-
-// Map Visibility enum or string to a serialized key.
-function visibilityKey(value) {
-  if (!value) return null;
-  if (typeof value === 'string') return value;
-  // Enum values stringify to their key names in Apps Script.
-  return String(value);
-}
-
-function coerceVisibility(value) {
-  var key = visibilityKey(value);
-  if (key && CalendarApp.Visibility[key]) {
-    return CalendarApp.Visibility[key];
-  }
-  return UserSettingsDefaults.visibility || CalendarApp.Visibility.DEFAULT;
-}
-
-function mergeSettings(defaults, overrides) {
-  var result = {};
-  for (var key in defaults) {
-    if (!defaults.hasOwnProperty(key)) continue;
-    if (overrides && overrides.hasOwnProperty(key) && overrides[key] !== undefined && overrides[key] !== null) {
-      result[key] = overrides[key];
-    } else {
-      result[key] = defaults[key];
-    }
-  }
-  return result;
-}
-
-function normalizeIncludeDays(days, fallback) {
-  var src = Array.isArray(days) ? days : (typeof days === 'string' ? days.split(',') : []);
-  var normalized = [];
-  for (var i = 0; i < src.length; i++) {
-    var n = parseInt(src[i], 10);
-    if (!isNaN(n) && n >= 0 && n <= 6 && normalized.indexOf(n) === -1) {
-      normalized.push(n);
-    }
-  }
-  return normalized.length ? normalized : (fallback || UserSettingsDefaults.includeDays);
-}
-
-function normalizeSourceCalendars(sourceCalendars) {
-  if (!Array.isArray(sourceCalendars)) return [];
-  var normalized = [];
-  for (var i = 0; i < sourceCalendars.length; i++) {
-    var sc = sourceCalendars[i] || {};
-    if (!sc.id || typeof sc.id !== 'string') continue;
-    var id = sc.id;
-    var title = sc.title || ('Unavailable (' + id + ')');
-    normalized.push({ id: id, title: title });
-  }
-  return normalized;
-}
-
-function normalizeSettings(raw) {
-  var defaults = UserSettingsDefaults;
-  var merged = mergeSettings(defaults, raw || {});
-  merged.windowDays = Math.max(1, Math.min(90, parseInt(merged.windowDays, 10) || defaults.windowDays));
-  merged.includeDays = normalizeIncludeDays(merged.includeDays, defaults.includeDays);
-  merged.destinationEventTitle = (merged.destinationEventTitle && String(merged.destinationEventTitle).trim()) || defaults.destinationEventTitle;
-  merged.color = (merged.color && String(merged.color)) || defaults.color;
-  merged.removeReminders = !!merged.removeReminders;
-  merged.visibility = coerceVisibility(merged.visibility);
-  merged.sourceCalendars = normalizeSourceCalendars(merged.sourceCalendars);
-  return merged;
-}
-
-function loadStoredUserSettings() {
-  var props = PropertiesService.getUserProperties();
-  var raw = props.getProperty(USER_SETTINGS_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch (e) {
-    Logger.log('Could not parse stored user settings; using defaults. ' + e);
-    return null;
-  }
-}
-
-function saveUserSettings(updates) {
-  var current = loadUserSettings();
-  var mergedInput = {
-    windowDays: updates.windowDays,
-    includeDays: updates.includeDays,
-    destinationEventTitle: updates.destinationEventTitle,
-    color: updates.color,
-    visibility: updates.visibility,
-    sourceCalendars: updates.sourceCalendars,
-    // Hidden/locked: preserve existing values
-    removeReminders: current.removeReminders
-  };
-  var normalized = normalizeSettings(mergedInput);
-  var props = PropertiesService.getUserProperties();
-  props.setProperty(USER_SETTINGS_KEY, JSON.stringify({
-    windowDays: normalized.windowDays,
-    includeDays: normalized.includeDays,
-    destinationEventTitle: normalized.destinationEventTitle,
-    color: normalized.color,
-    removeReminders: normalized.removeReminders,
-    visibility: visibilityKey(normalized.visibility),
-    sourceCalendars: normalized.sourceCalendars
-  }));
-  return normalized;
-}
-
-function loadUserSettings() {
-  var stored = loadStoredUserSettings();
-  if (stored) {
-    return normalizeSettings(stored);
-  }
-  if (typeof UserSettingsLocal !== 'undefined') {
-    return normalizeSettings(UserSettingsLocal);
-  }
-  return normalizeSettings(UserSettingsDefaults);
-}
-
 function requireSettings(calendarId, eventTitle) {
   if (typeof AdminControls === 'undefined') {
     throw new Error('AdminControls is not defined. Ensure admin_config.gs is loaded before Code.gs.');
@@ -137,7 +19,7 @@ function requireSettings(calendarId, eventTitle) {
   if (typeof UserSettingsDefaults === 'undefined' && typeof UserSettingsLocal === 'undefined') {
     throw new Error('User settings are not defined. Add user_settings_defaults.gs (UserSettingsDefaults) or user_settings.local.gs before Code.gs.');
   }
-  var user = loadUserSettings();
+  var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal : UserSettingsDefaults;
   return {
     admin: AdminControls,
     user: user,
@@ -192,10 +74,9 @@ function isBusyBlockerEvent(ev, settings, originCalendarId, requireTitleMatch) {
   return originTag === originCalendarId && !!sourceTag && titleOk;
 }
 
-// Only use HTML blob; ignore legacy promoMessage. Admin decides whether to clear description if empty.
-function applyDescription(targetDescription, user, admin) {
-  var shouldClear = (admin && typeof admin.CLEAR_DESCRIPTION === 'boolean') ? admin.CLEAR_DESCRIPTION : (user && user.clearDescription);
-  if (shouldClear && (!targetDescription || targetDescription.length === 0)) {
+// Only use HTML blob; ignore legacy promoMessage. Respect clearDescription if HTML is empty.
+function applyDescription(targetDescription, user) {
+  if (user.clearDescription && (!targetDescription || targetDescription.length === 0)) {
     return '';
   }
   return targetDescription || '';
@@ -227,7 +108,7 @@ function updateExisting(existingEvent, srcEvent, settings, state, sourceId) {
   var changed = false;
   var user = settings.user;
   var admin = settings.admin;
-  var targetDescription = applyDescription(settings.promoHtml, user, admin);
+  var targetDescription = applyDescription(settings.promoHtml, user);
 
   if (existingEvent.getTitle() !== settings.destinationEventTitle) {
     existingEvent.setTitle(settings.destinationEventTitle);
@@ -274,7 +155,7 @@ function updateExisting(existingEvent, srcEvent, settings, state, sourceId) {
 function createBlockingEvent(srcEvent, calendars, settings, state, sourceId) {
   var user = settings.user;
   var admin = settings.admin;
-  var targetDescription = applyDescription(settings.promoHtml, user, admin);
+  var targetDescription = applyDescription(settings.promoHtml, user);
   var newEvent = calendars.dest.createEvent(
     settings.destinationEventTitle,
     srcEvent.getStartTime(),
@@ -415,9 +296,9 @@ function sync(calendarid, eventTitle) {
 }
 
 function syncAllCalendars() {
-  var user = loadUserSettings();
+  var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal : UserSettingsDefaults;
   if (!user.sourceCalendars || user.sourceCalendars.length === 0) {
-    Logger.log('No sourceCalendars configured in user settings.');
+    Logger.log('No sourceCalendars configured in UserSettingsDefaults/UserSettingsLocal.');
     return;
   }
   for (var i = 0; i < user.sourceCalendars.length; i++) {
@@ -429,7 +310,7 @@ function syncAllCalendars() {
 }
 
 // ----------------
-// ADMIN: Find / update / purge blockers
+// Find / update / purge blockers
 // ----------------
 
 // Identify BusyBlocker events. Returns lightweight metadata and logs each match.
@@ -454,6 +335,7 @@ function findBusyBlockEvents(originCalendarId, startDate, endDate, requireTitleM
         sourceTag: ev.getTag(settings.admin.SOURCE_TAG)
       };
       matches.push(match);
+      Logger.log('Match found: ' + match.title + ' [' + match.start + ' - ' + match.end + '] id=' + match.id);
     }
   }
   Logger.log('Found ' + matches.length + ' BusyBlocker events for ' + originCalendarId + ' in range ' + dates.start + ' - ' + dates.end);
@@ -462,9 +344,9 @@ function findBusyBlockEvents(originCalendarId, startDate, endDate, requireTitleM
 
 // Update BusyBlocker events to current USER settings (title/color/visibility/reminders/tags, promo text/html).
 function updateAllBusyBlocks_UserSettings(requireTitleMatch) {
-  var user = loadUserSettings();
+  var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal : UserSettingsDefaults;
   if (!user.sourceCalendars || user.sourceCalendars.length === 0) {
-    Logger.log('No sourceCalendars configured in user settings.');
+    Logger.log('No sourceCalendars configured in UserSettingsDefaults/UserSettingsLocal.');
     return;
   }
   for (var i = 0; i < user.sourceCalendars.length; i++) {
@@ -483,7 +365,7 @@ function updateAllBusyBlocks_UserSettings(requireTitleMatch) {
       var ev = destCal.getEventById(matches[j].id);
       if (!ev) continue;
       if (!isBusyBlockerEvent(ev, settings, originCalendarId, requireTitleMatch)) continue;
-      var targetDescription = applyDescription(settings.promoHtml, settings.user, settings.admin);
+      var targetDescription = applyDescription(settings.promoHtml, settings.user);
       if (ev.getTitle() !== settings.user.destinationEventTitle) {
         ev.setTitle(settings.user.destinationEventTitle);
         countWrite(state);
@@ -544,9 +426,9 @@ function deleteBusyBlockEvents(originCalendarId, matches, requireTitleMatch) {
 
 // Controller: find then delete for all configured origin calendars (using sync window).
 function purgeAllBusyBlocks(requireTitleMatch) {
-  var user = loadUserSettings();
+  var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal : UserSettingsDefaults;
   if (!user.sourceCalendars || user.sourceCalendars.length === 0) {
-    Logger.log('No sourceCalendars configured in user settings.');
+    Logger.log('No sourceCalendars configured in UserSettingsDefaults/UserSettingsLocal.');
     return;
   }
   for (var i = 0; i < user.sourceCalendars.length; i++) {
@@ -558,9 +440,9 @@ function purgeAllBusyBlocks(requireTitleMatch) {
 
 // Overwrite descriptions for all BusyBlocker events with current promo HTML/message (admin-controlled).
 function updateAllBusyBlocks_AdminDescription(requireTitleMatch) {
-  var user = loadUserSettings();
+  var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal : UserSettingsDefaults;
   if (!user.sourceCalendars || user.sourceCalendars.length === 0) {
-    Logger.log('No sourceCalendars configured in user settings.');
+    Logger.log('No sourceCalendars configured in UserSettingsDefaults/UserSettingsLocal.');
     return;
   }
   for (var i = 0; i < user.sourceCalendars.length; i++) {

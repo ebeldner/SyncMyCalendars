@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        padding: 16px;
+        color: #1f1f1f;
+      }
+      h2 {
+        margin-top: 0;
+      }
+      .field {
+        margin-bottom: 12px;
+      }
+      .cal-list {
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        max-height: 240px;
+        overflow: auto;
+        padding: 8px;
+      }
+      .cal-item {
+        display: flex;
+        align-items: center;
+        padding: 4px 0;
+      }
+      .cal-item label {
+        flex: 1;
+        cursor: pointer;
+      }
+      .actions {
+        margin-top: 16px;
+        display: flex;
+        gap: 8px;
+      }
+      button {
+        padding: 6px 12px;
+      }
+      .status {
+        margin-bottom: 12px;
+        font-size: 12px;
+        color: #444;
+      }
+      .error {
+        color: #b00020;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+      }
+      .row .field {
+        flex: 1;
+      }
+      small {
+        color: #555;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>BusyBlocker Settings</h2>
+    <div id="status" class="status">Loading calendars and settings…</div>
+    <form id="settingsForm" onsubmit="event.preventDefault(); saveSettings();">
+      <div class="field">
+        <label>
+          Destination event title<br>
+          <input type="text" id="destinationEventTitle" required>
+        </label>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label>
+            Window days<br>
+            <input type="number" id="windowDays" min="1" max="90">
+          </label>
+          <small>How far ahead to mirror events.</small>
+        </div>
+        <div class="field">
+          <label>
+            Color code<br>
+            <input type="text" id="color">
+          </label>
+          <small>Calendar event color (1-11). Leave blank to keep default.</small>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>
+          Visibility<br>
+          <select id="visibility">
+            <option value="DEFAULT">Default</option>
+            <option value="PRIVATE">Private</option>
+            <option value="PUBLIC">Public</option>
+            <option value="CONFIDENTIAL">Confidential</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="field">
+        <label>Include days of week</label><br>
+        <small>Select which days from origin calendars should be mirrored.</small>
+        <div id="daysContainer"></div>
+      </div>
+
+      <div class="field">
+        <label>Origin calendars</label><br>
+        <small>Select the calendars to mirror into your primary calendar.</small>
+        <div id="calendarList" class="cal-list"></div>
+      </div>
+
+      <div class="actions">
+        <button type="submit">Save</button>
+        <button type="button" onclick="resetSettings()">Reset to defaults</button>
+      </div>
+    </form>
+
+    <script>
+      var state = {
+        calendars: [],
+        settings: null
+      };
+
+      function setStatus(msg, isError) {
+        var el = document.getElementById('status');
+        el.textContent = msg;
+        el.className = 'status' + (isError ? ' error' : '');
+      }
+
+      function renderDays(selected) {
+        var container = document.getElementById('daysContainer');
+        container.innerHTML = '';
+        var labels = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        for (var i = 0; i < 7; i++) {
+          var id = 'day-' + i;
+          var wrap = document.createElement('label');
+          wrap.style.marginRight = '8px';
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.value = i;
+          cb.id = id;
+          cb.checked = selected.indexOf(i) !== -1;
+          wrap.appendChild(cb);
+          wrap.appendChild(document.createTextNode(' ' + labels[i]));
+          container.appendChild(wrap);
+        }
+      }
+
+      function renderCalendars(calendars, selectedIds) {
+        var container = document.getElementById('calendarList');
+        container.innerHTML = '';
+        for (var i = 0; i < calendars.length; i++) {
+          var cal = calendars[i];
+          var id = 'cal-' + i;
+          var row = document.createElement('div');
+          row.className = 'cal-item';
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.id = id;
+          cb.value = cal.id;
+          cb.checked = !!selectedIds[cal.id];
+          var label = document.createElement('label');
+          label.setAttribute('for', id);
+          label.textContent = cal.name + (cal.primary ? ' (primary)' : '');
+          row.appendChild(cb);
+          row.appendChild(label);
+          container.appendChild(row);
+        }
+      }
+
+      function populateForm(data) {
+        state.calendars = data.calendars;
+        state.settings = data.settings;
+        document.getElementById('destinationEventTitle').value = data.settings.destinationEventTitle || '';
+        document.getElementById('windowDays').value = data.settings.windowDays || '';
+        document.getElementById('color').value = data.settings.color || '';
+        document.getElementById('visibility').value = (data.settings.visibility && data.settings.visibility.toString()) || 'DEFAULT';
+        renderDays(data.settings.includeDays || []);
+        var selectedIds = {};
+        for (var i = 0; i < (data.settings.sourceCalendars || []).length; i++) {
+          selectedIds[data.settings.sourceCalendars[i].id] = true;
+        }
+        renderCalendars(data.calendars, selectedIds);
+        setStatus('Settings loaded. Select origin calendars and save.');
+      }
+
+      function loadData() {
+        setStatus('Loading calendars and settings…');
+        google.script.run
+          .withSuccessHandler(populateForm)
+          .withFailureHandler(function(err) {
+            setStatus('Failed to load settings: ' + err.message, true);
+          })
+          .getSettingsData();
+      }
+
+      function collectIncludeDays() {
+        var days = [];
+        var inputs = document.querySelectorAll('#daysContainer input[type=checkbox]');
+        for (var i = 0; i < inputs.length; i++) {
+          if (inputs[i].checked) {
+            days.push(parseInt(inputs[i].value, 10));
+          }
+        }
+        return days;
+      }
+
+      function collectSelectedCalendars() {
+        var selected = [];
+        var inputs = document.querySelectorAll('#calendarList input[type=checkbox]');
+        for (var i = 0; i < inputs.length; i++) {
+          if (inputs[i].checked) {
+            var id = inputs[i].value;
+            var match = state.calendars.filter(function(c) { return c.id === id; })[0];
+            selected.push({ id: id, title: match ? match.name : ('Unavailable (' + id + ')') });
+          }
+        }
+        return selected;
+      }
+
+      function saveSettings() {
+        setStatus('Saving…');
+        var payload = {
+          destinationEventTitle: document.getElementById('destinationEventTitle').value,
+          windowDays: document.getElementById('windowDays').value,
+          color: document.getElementById('color').value,
+          visibility: document.getElementById('visibility').value,
+          includeDays: collectIncludeDays(),
+          sourceCalendars: collectSelectedCalendars()
+        };
+        google.script.run
+          .withSuccessHandler(function(saved) {
+            populateForm({ settings: saved, calendars: state.calendars });
+            setStatus('Saved. The next sync will use these settings.');
+          })
+          .withFailureHandler(function(err) {
+            setStatus('Failed to save: ' + err.message, true);
+          })
+          .saveSettingsFromClient(payload);
+      }
+
+      function resetSettings() {
+        if (!confirm('Reset to defaults? This will clear saved preferences.')) return;
+        setStatus('Resetting…');
+        google.script.run
+          .withSuccessHandler(function(saved) {
+            populateForm({ settings: saved, calendars: state.calendars });
+            setStatus('Reset to defaults.');
+          })
+          .withFailureHandler(function(err) {
+            setStatus('Failed to reset: ' + err.message, true);
+          })
+          .resetUserSettings();
+      }
+
+      document.addEventListener('DOMContentLoaded', loadData);
+    </script>
+  </body>
+</html>

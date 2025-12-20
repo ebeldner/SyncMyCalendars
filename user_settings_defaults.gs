@@ -4,7 +4,6 @@ var UserSettingsDefaults = {
   includeDays: [0,1,2,3,4,5,6], // all days
   destinationEventTitle: 'Unavailable',
   color: '8', // gray
-  clearDescription: true,
   removeReminders: true,
   visibility: CalendarApp.Visibility.DEFAULT,
   // Add your source calendars in user_settings.local.gs (UserSettingsLocal).
