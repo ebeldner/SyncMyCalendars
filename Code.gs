@@ -53,6 +53,14 @@ function sourceKey(evt) {
   return evt.getId() + '|' + anchor;
 }
 
+// Determines if a destination event was created by BusyBlocker for the given origin calendar.
+function isBusyBlockerEvent(ev, settings, originCalendarId, requireTitleMatch) {
+  var originTag = ev.getTag(settings.admin.ORIGIN_TAG);
+  var sourceTag = ev.getTag(settings.admin.SOURCE_TAG);
+  var titleOk = !requireTitleMatch || ev.getTitle() === settings.destinationEventTitle;
+  return originTag === originCalendarId && !!sourceTag && titleOk;
+}
+
 function isTransparent(evt, admin) {
   if (!admin.SKIP_FREE_EVENTS) return false;
   try {
@@ -294,8 +302,81 @@ function syncAllCalendars() {
   }
   for (var i = 0; i < user.sourceCalendars.length; i++) {
     var cfg = user.sourceCalendars[i];
-    var calId = cfg.id;
-    var title = cfg.title || ('Unavailable (' + calId + ')');
-    sync(calId, title);
+    var originCalendarId = cfg.id;
+    var title = cfg.title || ('Unavailable (' + originCalendarId + ')');
+    sync(originCalendarId, title);
+  }
+}
+
+// Identify BusyBlocker events
+// Returns an array of lightweight objects with event metadata
+function findBusyBlockEvents(originCalendarId, startDate, endDate, requireTitleMatch) {
+  if (!originCalendarId) {
+    throw new Error('originCalendarId is required to find BusyBlocker events.');
+  }
+  var settings = requireSettings(originCalendarId, null);
+  var destCal = CalendarApp.getDefaultCalendar();
+  var dates = (startDate && endDate) ? { start: startDate, end: endDate } : windowDates(settings.user.windowDays);
+  var destEvents = destCal.getEvents(dates.start, dates.end);
+
+  var matches = [];
+  for (var i = 0; i < destEvents.length; i++) {
+    var ev = destEvents[i];
+    if (isBusyBlockerEvent(ev, settings, originCalendarId, requireTitleMatch)) {
+      var sourceTag = ev.getTag(settings.admin.SOURCE_TAG);
+      var match = {
+        id: ev.getId(),
+        title: ev.getTitle(),
+        start: ev.getStartTime(),
+        end: ev.getEndTime(),
+        sourceTag: sourceTag
+      };
+      matches.push(match);
+      Logger.log('Match found: ' + match.title + ' [' + match.start + ' - ' + match.end + '] id=' + match.id);
+    }
+  }
+  Logger.log('Found ' + matches.length + ' BusyBlocker events to delete for ' + originCalendarId + ' in range ' + dates.start + ' - ' + dates.end);
+  return matches;
+}
+
+// Delete BusyBlocker events by id; re-validates tags/title before deletion for safety.
+function deleteBusyBlockEvents(originCalendarId, matches, requireTitleMatch) {
+  if (!originCalendarId) {
+    throw new Error('originCalendarId is required to delete BusyBlocker events.');
+  }
+  var settings = requireSettings(originCalendarId, null);
+  var destCal = CalendarApp.getDefaultCalendar();
+  var deleted = 0;
+  for (var i = 0; i < matches.length; i++) {
+    var id = matches[i].id;
+    var ev = destCal.getEventById(id);
+    if (!ev) {
+      continue;
+    }
+    if (isBusyBlockerEvent(ev, settings, originCalendarId, requireTitleMatch)) {
+      ev.deleteEvent();
+      deleted++;
+    }
+  }
+  Logger.log('Delete summary for ' + originCalendarId + ': deleted ' + deleted + ' events (from ' + matches.length + ' candidates)');
+}
+
+// Controller: find then delete for all configured origin calendars (using sync window).
+function purgeAllBusyBlocks(requireTitleMatch) {
+  if (typeof AdminControls === 'undefined') {
+    throw new Error('AdminControls is not defined. Ensure admin_config.gs is loaded before Code.gs.');
+  }
+  if (typeof UserSettingsDefaults === 'undefined' && typeof UserSettingsLocal === 'undefined') {
+    throw new Error('User settings are not defined. Add user_settings_defaults.gs (UserSettingsDefaults) or user_settings.local.gs before Code.gs.');
+  }
+  var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal : UserSettingsDefaults;
+  if (!user.sourceCalendars || user.sourceCalendars.length === 0) {
+    Logger.log('No sourceCalendars configured in UserSettingsDefaults/UserSettingsLocal.');
+    return;
+  }
+  for (var i = 0; i < user.sourceCalendars.length; i++) {
+    var originCalendarId = user.sourceCalendars[i].id;
+    var matches = findBusyBlockEvents(originCalendarId, null, null, requireTitleMatch);
+    deleteBusyBlockEvents(originCalendarId, matches, requireTitleMatch);
   }
 }
