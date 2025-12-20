@@ -1,296 +1,284 @@
 /*
-  NOTE: if this script is being run on multiple of the shared calendars
-  Secondary calendars must be shared with all event details in order to 
-  avoid cross-creation of duplicate blocking events. This is prevented by 
-  setting and reading a SyncMyCalendars key with value set to the origin
-  calendar ID; however, this tag will only be shared with the destination
-  calendar if the permissions are set to "share all details". (Share free-busy
-  only will not work)
+  BusyBlocker core sync logic.
+  Requirements preserved:
+  - Reads from source calendars and writes blockers to the destination (default) calendar only.
+  - Clears/sets description to PROMO_MESSAGE (or empty), removes reminders if configured, sets visibility/color, and tags events.
+  - Skips all-day events and source events already tagged as created by SyncMyCalendars.
+  - Skips source events marked as transparent/free (configurable).
+  - Throttles writes and optionally enforces a write cap.
 */
-function sync( calendarid, eventTitle ) {
 
-  var id=calendarid; // id of the secondary calendar to pull events from
-
+function requireSettings(calendarId, eventTitle) {
   if (typeof AdminControls === 'undefined') {
     throw new Error('AdminControls is not defined. Ensure admin_config.gs is loaded before Code.gs.');
   }
   if (typeof UserSettingsDefaults === 'undefined' && typeof UserSettingsLocal === 'undefined') {
     throw new Error('User settings are not defined. Add user_settings_defaults.gs (UserSettingsDefaults) or user_settings.local.gs before Code.gs.');
   }
-  // Prefer local override (not checked in), else committed defaults
-  var admin = AdminControls;
   var user = (typeof UserSettingsLocal !== 'undefined') ? UserSettingsLocal : UserSettingsDefaults;
-
-  // Local aliases for readability
-  var WRITE_LIMIT = admin.WRITE_LIMIT;
-  var ENFORCE_WRITE_LIMIT = admin.ENFORCE_WRITE_LIMIT;
-  var WRITE_PAUSE_MS = admin.WRITE_PAUSE_MS;
-  var BURST_WRITE_PAUSE_MS = admin.BURST_WRITE_PAUSE_MS;
-  var BURST_CREATE_THRESHOLD = admin.BURST_CREATE_THRESHOLD;
-  var SOURCE_TAG = admin.SOURCE_TAG;
-  var ORIGIN_TAG = admin.ORIGIN_TAG;
-  var PROMO_MESSAGE = admin.PROMO_MESSAGE || '';
-
-  var writes = 0;
-  var stopEarly = false;
-  var sourceKey = function(evt) {
-    var original = evt.getOriginalStartTime ? evt.getOriginalStartTime() : null;
-    var anchor = original ? original.getTime() : evt.getStartTime().getTime();
-    return evt.getId() + '|' + anchor;
+  return {
+    admin: AdminControls,
+    user: user,
+    calendarId: calendarId,
+    destinationEventTitle: eventTitle || user.destinationEventTitle,
+    promoMessage: AdminControls.PROMO_MESSAGE || ''
   };
+}
 
-  var isTransparent = function(evt) {
-    try {
-      return evt.getTransparency() === CalendarApp.EventTransparency.TRANSPARENT;
-    } catch (e) {
-      // If the event is opaque, deleted, or otherwise inaccessible, treat it as opaque
-      return false;
+function windowDates(daysAhead) {
+  var today = new Date();
+  var end = new Date();
+  end.setDate(today.getDate() + daysAhead);
+  return { start: today, end: end };
+}
+
+function countWrite(state) {
+  state.writes++;
+  var pause = state.admin.WRITE_PAUSE_MS;
+  if (state.createdCount > state.admin.BURST_CREATE_THRESHOLD) {
+    pause = state.admin.BURST_WRITE_PAUSE_MS;
+  }
+  if (pause > 0) {
+    Utilities.sleep(pause);
+  }
+}
+
+function shouldStop(state) {
+  return state.admin.ENFORCE_WRITE_LIMIT && state.admin.WRITE_LIMIT > 0 && state.writes >= state.admin.WRITE_LIMIT;
+}
+
+function sourceKey(evt) {
+  var original = evt.getOriginalStartTime ? evt.getOriginalStartTime() : null;
+  var anchor = original ? original.getTime() : evt.getStartTime().getTime();
+  return evt.getId() + '|' + anchor;
+}
+
+function isTransparent(evt, admin) {
+  if (!admin.SKIP_FREE_EVENTS) return false;
+  try {
+    return evt.getTransparency() === CalendarApp.EventTransparency.TRANSPARENT;
+  } catch (e) {
+    // Treat as opaque on error
+    return false;
+  }
+}
+
+function indexDestination(events, destinationEventTitle, tags) {
+  var filtered = [];
+  var byTime = {};
+  var bySource = {};
+  for (var i = 0; i < events.length; i++) {
+    var ev = events[i];
+    var originTag = ev.getTag(tags.origin);
+    var sourceTag = ev.getTag(tags.source);
+    if (originTag === tags.originValue || ev.getTitle() === destinationEventTitle) {
+      filtered.push(ev);
+      byTime[ev.getStartTime().getTime() + '|' + ev.getEndTime().getTime()] = ev;
+      if (sourceTag) {
+        bySource[sourceTag] = ev;
+      }
     }
-  };
+  }
+  return { filtered: filtered, byTime: byTime, bySource: bySource };
+}
 
-  var today=new Date();
-  var enddate=new Date();
-  enddate.setDate(today.getDate()+user.windowDays);
-  
-  var secondaryCal=CalendarApp.getCalendarById(id);
-  if (!secondaryCal) {
-    Logger.log('Secondary calendar not found or inaccessible: ' + id);
+function applyDescription(targetDescription, user) {
+  if (user.clearDescription && (targetDescription === null || targetDescription === undefined)) {
+    return '';
+  }
+  return (targetDescription === null || targetDescription === undefined) ? '' : targetDescription;
+}
+
+function updateExisting(existingEvent, srcEvent, settings, state, sourceId) {
+  var changed = false;
+  var user = settings.user;
+  var admin = settings.admin;
+  var targetDescription = applyDescription(settings.promoMessage, user);
+
+  if (existingEvent.getTitle() !== settings.destinationEventTitle) {
+    existingEvent.setTitle(settings.destinationEventTitle);
+    changed = true;
+    countWrite(state);
+  }
+  if (existingEvent.getVisibility() !== user.visibility) {
+    existingEvent.setVisibility(user.visibility);
+    changed = true;
+    countWrite(state);
+  }
+  if (existingEvent.getColor() !== user.color) {
+    existingEvent.setColor(user.color);
+    changed = true;
+    countWrite(state);
+  }
+  if (existingEvent.getTag(admin.ORIGIN_TAG) !== settings.calendarId) {
+    existingEvent.setTag(admin.ORIGIN_TAG, settings.calendarId);
+    changed = true;
+    countWrite(state);
+  }
+  var existingSourceTag = existingEvent.getTag(admin.SOURCE_TAG);
+  if (existingSourceTag !== sourceId) {
+    existingEvent.setTag(admin.SOURCE_TAG, sourceId);
+    changed = true;
+    countWrite(state);
+  }
+  if (existingEvent.getDescription() !== targetDescription) {
+    existingEvent.setDescription(targetDescription);
+    changed = true;
+    countWrite(state);
+  }
+  var startChanged = existingEvent.getStartTime().getTime() !== srcEvent.getStartTime().getTime();
+  var endChanged = existingEvent.getEndTime().getTime() !== srcEvent.getEndTime().getTime();
+  if (startChanged || endChanged) {
+    existingEvent.setTime(srcEvent.getStartTime(), srcEvent.getEndTime());
+    changed = true;
+    countWrite(state);
+  }
+
+  state.updatedIds.push(existingEvent.getId());
+  return changed;
+}
+
+function createBlockingEvent(srcEvent, calendars, settings, state, sourceId) {
+  var user = settings.user;
+  var admin = settings.admin;
+  var targetDescription = applyDescription(settings.promoMessage, user);
+  var newEvent = calendars.dest.createEvent(
+    settings.destinationEventTitle,
+    srcEvent.getStartTime(),
+    srcEvent.getEndTime()
+  );
+  newEvent.setDescription(targetDescription);
+  newEvent.setTag(admin.ORIGIN_TAG, settings.calendarId);
+  newEvent.setTag(admin.SOURCE_TAG, sourceId);
+  newEvent.setVisibility(user.visibility);
+  newEvent.setColor(user.color);
+  if (user.removeReminders) {
+    newEvent.removeAllReminders();
+  }
+  state.createdCount += 1;
+  countWrite(state);
+  return newEvent;
+}
+
+function cleanupDeleted(lookups, updatedIds, state, settings) {
+  if (state.stopEarly) return;
+  var admin = settings.admin;
+  var deletions = [];
+  for (var i = 0; i < lookups.filtered.length; i++) {
+    var ev = lookups.filtered[i];
+    var evId = ev.getId();
+    var sourceTag = ev.getTag(admin.SOURCE_TAG);
+    var skipDelete = sourceTag && state.seenSourceIds[sourceTag];
+    if (updatedIds.indexOf(evId) === -1 && !skipDelete) {
+      deletions.push(ev);
+    }
+  }
+  for (var j = 0; j < deletions.length; j++) {
+    deletions[j].deleteEvent();
+    state.deletedCount += 1;
+    countWrite(state);
+    if (shouldStop(state)) {
+      state.stopEarly = true;
+      break;
+    }
+  }
+}
+
+function logSummary(lookups, state) {
+  Logger.log('Primary events previously created: ' + lookups.filtered.length);
+  Logger.log('Primary events updated: ' + state.updatedCount);
+  Logger.log('Primary events deleted: ' + state.deletedCount);
+  Logger.log('Primary events created: ' + state.createdCount);
+  Logger.log('Write operations this run: ' + state.writes);
+}
+
+function processSourceEvents(sourceEvents, lookups, calendars, settings, state) {
+  for (var i = 0; i < sourceEvents.length; i++) {
+    var event_i = sourceEvents[i];
+    var sourceId = sourceKey(event_i);
+    var existingFromSource = lookups.bySource[sourceId];
+
+    if (isTransparent(event_i, settings.admin)) {
+      continue;
+    }
+    if (event_i.isAllDayEvent()) {
+      continue;
+    }
+    if (event_i.getTag("CreatedBySyncMyCalendars") !== null) {
+      continue;
+    }
+    var n = event_i.getStartTime().getDay();
+    if (settings.user.includeDays.indexOf(n) === -1) {
+      continue;
+    }
+
+    var existingEvent = existingFromSource || lookups.byTime[event_i.getStartTime().getTime() + '|' + event_i.getEndTime().getTime()];
+
+    if (existingEvent) {
+      var changed = updateExisting(existingEvent, event_i, settings, state, sourceId);
+      state.seenSourceIds[sourceId] = true;
+      state.updatedCount += 1; // count touch even if no fields changed
+      if (shouldStop(state)) {
+        state.stopEarly = true;
+        break;
+      }
+      continue;
+    }
+
+    // Create new blocker
+    var newEvent = createBlockingEvent(event_i, calendars, settings, state, sourceId);
+    lookups.byTime[newEvent.getStartTime().getTime() + '|' + newEvent.getEndTime().getTime()] = newEvent;
+    lookups.bySource[sourceId] = newEvent;
+    state.seenSourceIds[sourceId] = true;
+    // createdCount already incremented in createBlockingEvent
+    if (shouldStop(state)) {
+      state.stopEarly = true;
+      break;
+    }
+  }
+}
+
+function sync(calendarid, eventTitle) {
+  var settings = requireSettings(calendarid, eventTitle);
+  var dates = windowDates(settings.user.windowDays);
+
+  var calendars = {
+    source: CalendarApp.getCalendarById(calendarid),
+    dest: CalendarApp.getDefaultCalendar()
+  };
+  if (!calendars.source) {
+    Logger.log('Secondary calendar not found or inaccessible: ' + calendarid);
     return;
   }
-  var secondaryEvents=secondaryCal.getEvents(today,enddate);
-  
-  var destinationCalendar=CalendarApp.getDefaultCalendar();
-  var destinationEvents=destinationCalendar.getEvents(today,enddate); // all primary calendar events
-  
-  var destinationEventTitle=eventTitle || user.destinationEventTitle;
-  
-  var stat=1;
-  var event_i, existingEvent; 
-  var destinationEventsFiltered = []; // to contain primary calendar events that were previously created from secondary calendar
-  var destinationEventsByTime = {}; // quick lookup by start/end to avoid unnecessary writes
-  var destinationEventsBySource = {}; // lookup by source event id tag to allow start/end changes without delete+create
-  var destinationEventsUpdated = []; // to contain primary calendar events that were updated from secondary calendar
-  var destinationEventsCreated = []; // to contain primary calendar events that were created from secondary calendar
-  var destinationEventsDeleted = []; // to contain primary calendar events previously created that have been deleted from secondary calendar
-  var seenSourceIds = {}; // track which source events were processed to avoid deleting moved events
-  var countWrite = function() {
-    writes++;
-    var pause = WRITE_PAUSE_MS;
-    if (destinationEventsCreated.length > BURST_CREATE_THRESHOLD) {
-      pause = BURST_WRITE_PAUSE_MS;
-    }
-    if (pause > 0) {
-      Utilities.sleep(pause);
-    }
-  };
-  var shouldStop = function() {
-    return ENFORCE_WRITE_LIMIT && WRITE_LIMIT > 0 && writes >= WRITE_LIMIT;
+
+  var secondaryEvents = calendars.source.getEvents(dates.start, dates.end);
+  var destinationEvents = calendars.dest.getEvents(dates.start, dates.end);
+
+  var lookups = indexDestination(destinationEvents, settings.destinationEventTitle, {
+    origin: settings.admin.ORIGIN_TAG,
+    originValue: calendarid,
+    source: settings.admin.SOURCE_TAG
+  });
+
+  var state = {
+    admin: settings.admin,
+    writes: 0,
+    stopEarly: false,
+    createdCount: 0,
+    updatedCount: 0,
+    deletedCount: 0,
+    seenSourceIds: {},
+    updatedIds: []
   };
 
-  Logger.log( id + ' - number of primaryEvents: ' + destinationEvents.length);  
-  Logger.log( id + ' - number of secondaryEvents: ' + secondaryEvents.length);
-  
-  // create filtered list of existing primary calendar events that were previously created from the secondary calendar
-  for (destev in destinationEvents)
-  {
-    var destinationEvent = destinationEvents[destev];
-    var destOriginTag = destinationEvent.getTag(ORIGIN_TAG);
-    var destSourceTag = destinationEvent.getTag(SOURCE_TAG);
-    if (destOriginTag === calendarid || destinationEvent.getTitle() == destinationEventTitle)
-    { 
-      destinationEventsFiltered.push(destinationEvent); 
-      destinationEventsByTime[destinationEvent.getStartTime().getTime() + '|' + destinationEvent.getEndTime().getTime()] = destinationEvent;
-      if (destSourceTag) {
-        destinationEventsBySource[destSourceTag] = destinationEvent;
-      }
-    }
-  }
-  
-  // process all events in secondary calendar; either update, create, or delete
-  for (secev in secondaryEvents)
-  {
-    stat=1;
-    event_i=secondaryEvents[secev];
-    var sourceId = sourceKey(event_i);
-    var existingFromSource = destinationEventsBySource[sourceId];
+  Logger.log(calendarid + ' - number of primaryEvents: ' + destinationEvents.length);
+  Logger.log(calendarid + ' - number of secondaryEvents: ' + secondaryEvents.length);
 
-    // Skip to next iteration if the origin event is transparent (free)
-    if (isTransparent(event_i)) {
-      continue;
-    }
+  processSourceEvents(secondaryEvents, lookups, calendars, settings, state);
+  cleanupDeleted(lookups, state.updatedIds, state, settings);
 
-    // Prefer matching by source tag to survive start/end changes, else fall back to time match
-    if (existingFromSource)
-    {
-      existingEvent = existingFromSource;
-    } else {
-      var existingKey = event_i.getStartTime().getTime() + '|' + event_i.getEndTime().getTime();
-      existingEvent = destinationEventsByTime[existingKey];
-    }
-
-    // if the secondary event has already been blocked in the primary calendar, update it
-    if (existingEvent)
-    {
-      stat=0;
-      var changed = false;
-      // Only write if something actually needs to change to avoid quota issues
-      if (existingEvent.getTitle() !== destinationEventTitle)
-      {
-        existingEvent.setTitle(destinationEventTitle);
-        changed = true;
-        countWrite();
-        if (shouldStop()) break;
-      }
-      if (existingEvent.getVisibility() !== user.visibility)
-      {
-        existingEvent.setVisibility(user.visibility);
-        changed = true;
-        countWrite();
-        if (shouldStop()) break;
-      }
-      if (existingEvent.getColor() !== user.color)
-      {
-        existingEvent.setColor(user.color);
-        changed = true;
-        countWrite();
-        if (shouldStop()) break;
-      }
-      if (existingEvent.getTag(ORIGIN_TAG) !== calendarid)
-      {
-        existingEvent.setTag(ORIGIN_TAG, calendarid);
-        changed = true;
-        countWrite();
-        if (shouldStop()) break;
-      }
-      var existingSourceTag = existingEvent.getTag(SOURCE_TAG);
-      if (existingSourceTag !== sourceId)
-      {
-        existingEvent.setTag(SOURCE_TAG, sourceId);
-        changed = true;
-        countWrite();
-        if (shouldStop()) break;
-      }
-      var targetDescription = (PROMO_MESSAGE !== null && PROMO_MESSAGE !== undefined) ? PROMO_MESSAGE : '';
-      if (user.clearDescription && targetDescription === '') {
-        // keep targetDescription as empty string
-      }
-      if (existingEvent.getDescription() !== targetDescription)
-      {
-        existingEvent.setDescription(targetDescription);
-        changed = true;
-        countWrite();
-        if (shouldStop()) break;
-      }
-      // If the time changed (e.g., edited recurring event), update instead of delete+create
-      var startChanged = existingEvent.getStartTime().getTime() !== event_i.getStartTime().getTime();
-      var endChanged = existingEvent.getEndTime().getTime() !== event_i.getEndTime().getTime();
-      if (startChanged || endChanged)
-      {
-        existingEvent.setTime(event_i.getStartTime(), event_i.getEndTime());
-        changed = true;
-        countWrite();
-        if (shouldStop()) break;
-      }
-      destinationEventsUpdated.push(existingEvent.getId());
-      seenSourceIds[sourceId] = true;
-      if (shouldStop()) {
-        Logger.log('Write limit reached during updates; stopping early');
-        stopEarly = true;
-        break;
-      }
-    }
-
-
-    if (stat==0) continue;    // event has been updated - continue to next object in event loop
-    
-    var d = event_i.getStartTime();
-    var n = d.getDay();
-
-    if (event_i.isAllDayEvent())
-    {
-      // Do nothing if the event is an all-day or multi-day event. This script only syncs hour-based events
-      continue; 
-    } 
-    else if ( event_i.getTag("CreatedBySyncMyCalendars") !== null ) 
-    {
-      continue;
-    }
-    else if (user.includeDays.indexOf(n) !== -1) // Only include configured days
-    // if the secondary event does not exist in the primary calendar, create it
-    {
-      // change the Booked text to whatever you would like your merged event titles to be
-      var newEvent = destinationCalendar.createEvent(destinationEventTitle,event_i.getStartTime(),event_i.getEndTime()); 
-
-      /*
-      // alternative version that copies the exact secondary event information into the primary calendar event
-      var newEvent = primaryCal.createEvent(
-          event_i.getTitle(),
-          event_i.getStartTime(),
-          event_i.getEndTime(), 
-          {
-            location: event_i.getLocation(), 
-            description: event_i.getDescription()
-          });  
-      newEvent.setDescription(event_i.getTitle() + '\n\n' + event_i.getDescription());
-      */
-      var targetDescription = (PROMO_MESSAGE !== null && PROMO_MESSAGE !== undefined) ? PROMO_MESSAGE : '';
-      newEvent.setDescription(targetDescription);
-
-      newEvent.setTag(ORIGIN_TAG, calendarid);
-      newEvent.setTag(SOURCE_TAG, sourceId);
-      newEvent.setVisibility(user.visibility); // set blocked time as default appointments in destination calendar
-      newEvent.setColor(user.color); // set the copied event's color
-
-      // so you don't get double notifications. 
-      // Delete this if you want to keep the default reminders for your newly created primary calendar events
-      if (user.removeReminders) {
-        newEvent.removeAllReminders();
-      }
-
-      destinationEventsCreated.push(newEvent.getId());
-      destinationEventsByTime[newEvent.getStartTime().getTime() + '|' + newEvent.getEndTime().getTime()] = newEvent;
-      destinationEventsBySource[sourceId] = newEvent;
-      seenSourceIds[sourceId] = true;
-      // Each setter above is a write; throttle after the block
-      countWrite();
-      if (shouldStop()) {
-        Logger.log('Write limit reached during creation; stopping early');
-        stopEarly = true;
-        break;
-      }
-    }
-  }
-
-  // if a primary event previously created no longer exists in the secondary calendar, delete it
-  if (!stopEarly)
-  {
-    for (pev in destinationEventsFiltered)
-    {
-      var pevIsUpdatedIndex = destinationEventsUpdated.indexOf(destinationEventsFiltered[pev].getId());
-      var pevSource = destinationEventsFiltered[pev].getTag(SOURCE_TAG);
-      var skipDelete = pevSource && seenSourceIds[pevSource];
-      if (pevIsUpdatedIndex == -1 && !skipDelete)
-      { 
-        var pevIdToDelete = destinationEventsFiltered[pev].getId();
-        destinationEventsDeleted.push(pevIdToDelete);
-        destinationEventsFiltered[pev].deleteEvent();
-        countWrite();
-        if (shouldStop()) {
-          Logger.log('Write limit reached during cleanup; stopping early');
-          stopEarly = true;
-          break;
-        }
-      }
-    }  
-  }
-
-  Logger.log('Primary events previously created: ' + destinationEventsFiltered.length);
-  Logger.log('Primary events updated: ' + destinationEventsUpdated.length);
-  Logger.log('Primary events deleted: ' + destinationEventsDeleted.length);
-  Logger.log('Primary events created: ' + destinationEventsCreated.length);
-  Logger.log('Write operations this run: ' + writes);
-
-}  
+  logSummary(lookups, state);
+}
 
 function syncAllCalendars() {
   if (typeof AdminControls === 'undefined') {
