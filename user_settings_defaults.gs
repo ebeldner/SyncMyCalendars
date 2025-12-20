@@ -7,8 +7,9 @@ var UserSettingsDefaults = {
   clearDescription: true,
   removeReminders: true,
   visibility: CalendarApp.Visibility.DEFAULT,
+  // Add your source calendars in user_settings.local.gs (UserSettingsLocal).
+  // This default stays empty to avoid PII in source control.
   sourceCalendars: [
-    { id: 'you1@example.com', title: 'Unavailable (you1@example.com)' },
-    // { id: 'you2@example.com', title: 'Unavailable (you2@example.com)' },
+    // { id: '<calendar-id>', title: 'Unavailable (<calendar-id>)' },
   ]
 };
