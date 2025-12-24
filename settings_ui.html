@@ -105,8 +105,8 @@
       </div>
 
       <div class="field">
-        <label>Origin calendars</label><br>
-        <small>Select the calendars to mirror into your primary calendar.</small>
+        <label>Origin calendars IS THIS UPDATING </label><br>
+        <small>Select calendars to mirror into your default (destination) calendar. Your default calendar is hidden from this list.</small>
         <div id="calendarList" class="cal-list"></div>
       </div>
 
@@ -119,7 +119,8 @@
     <script>
       var state = {
         calendars: [],
-        settings: null
+        settings: null,
+        destinationCalendarId: null
       };
 
       function setStatus(msg, isError) {
@@ -152,6 +153,10 @@
         container.innerHTML = '';
         for (var i = 0; i < calendars.length; i++) {
           var cal = calendars[i];
+          var isDestination = state.destinationCalendarId && cal.id === state.destinationCalendarId;
+          if (isDestination || cal.primary) {
+            continue; // destination calendar is not an origin option
+          }
           var id = 'cal-' + i;
           var row = document.createElement('div');
           row.className = 'cal-item';
@@ -172,6 +177,7 @@
       function populateForm(data) {
         state.calendars = data.calendars;
         state.settings = data.settings;
+        state.destinationCalendarId = data.destinationCalendarId || null;
         document.getElementById('destinationEventTitle').value = data.settings.destinationEventTitle || '';
         document.getElementById('windowDays').value = data.settings.windowDays || '';
         document.getElementById('color').value = data.settings.color || '';
@@ -231,7 +237,11 @@
         };
         google.script.run
           .withSuccessHandler(function(saved) {
-            populateForm({ settings: saved, calendars: state.calendars });
+            populateForm({
+              settings: saved,
+              calendars: state.calendars,
+              destinationCalendarId: state.destinationCalendarId
+            });
             setStatus('Saved. The next sync will use these settings.');
           })
           .withFailureHandler(function(err) {
@@ -245,7 +255,11 @@
         setStatus('Resetting…');
         google.script.run
           .withSuccessHandler(function(saved) {
-            populateForm({ settings: saved, calendars: state.calendars });
+            populateForm({
+              settings: saved,
+              calendars: state.calendars,
+              destinationCalendarId: state.destinationCalendarId
+            });
             setStatus('Reset to defaults.');
           })
           .withFailureHandler(function(err) {
